@@ -39,9 +39,6 @@
  */
 @property (nonatomic) BOOL tls;
 
-/// A Boolean value indicating whether the transport should send data over the cell network. Defaults to `YES`.
-@property (nonatomic) BOOL allowsCellularAccess;
-
 /** Require for VoIP background service
  * defaults to NO
  */

@@ -33,7 +33,6 @@
     self.host = @"localhost";
     self.port = 1883;
     self.tls = false;
-    self.allowsCellularAccess = YES;
     self.voip = false;
     self.certificates = nil;
     self.queue = dispatch_get_main_queue();
@@ -95,11 +94,6 @@
                                                code:errSSLInternal
                                            userInfo:@{NSLocalizedDescriptionKey : @"Fail to init ssl output stream!"}];
         }
-    }
-    
-    if (!self.allowsCellularAccess) {
-        CFReadStreamSetProperty(readStream, kCFStreamPropertyNoCellular, kCFBooleanTrue);
-        CFWriteStreamSetProperty(writeStream, kCFStreamPropertyNoCellular, kCFBooleanTrue);
     }
     
     if (!connectError) {
