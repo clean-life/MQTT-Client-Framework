@@ -81,7 +81,7 @@
 }
 
 - (BOOL)send:(NSData *)data {
-    if ([self.lock lockBeforeDate:[NSDate dateWithTimeIntervalSinceNow:5]]) {
+    if ([self.lock lockBeforeDate:[NSDate dateWithTimeIntervalSinceNow:3]]) {
         @try {
             if (self.state != MQTTCFSocketEncoderStateReady) {
                 DDLogInfo(@"[MQTTCFSocketEncoder] not MQTTCFSocketEncoderStateReady");
@@ -114,6 +114,8 @@
         } @finally {
             [self.lock unlock];
         }
+    } else {
+        DDLogInfo(@"[MQTTCFSocketEncoder] get send lock failed");
     }
     return NO;
 }

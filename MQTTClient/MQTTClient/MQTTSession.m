@@ -49,6 +49,7 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
 @property (nonatomic) BOOL synchronDisconnect;
 
 @property (strong, nonatomic) MQTTSSLSecurityPolicy *securityPolicy;
+@property (strong, nonatomic) dispatch_queue_t msgQueue;
 
 @end
 
@@ -90,6 +91,7 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
     self.queue = dispatch_get_main_queue();
     self.status = MQTTSessionStatusCreated;
     self.streamSSLLevel = (NSString *)kCFStreamSocketSecurityLevelNegotiatedSSL;
+    self.msgQueue = dispatch_queue_create("MQTTSessionMsgQueue", DISPATCH_QUEUE_CONCURRENT);
     return self;
 }
 
@@ -244,10 +246,12 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
     } else {
         [self.subscribeHandlers removeObjectForKey:@(mid)];
     }
-    (void)[self encode:[MQTTMessage subscribeMessageWithMessageId:mid
-                                                           topics:topics
-                                                    protocolLevel:self.protocolLevel
-                                           subscriptionIdentifier:nil]];
+    dispatch_async(self.msgQueue, ^{
+        (void)[self encode:[MQTTMessage subscribeMessageWithMessageId:mid
+                                                               topics:topics
+                                                        protocolLevel:self.protocolLevel
+                                               subscriptionIdentifier:nil]];
+    });
 
     return mid;
 }
@@ -275,9 +279,11 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
     } else {
         [self.unsubscribeHandlers removeObjectForKey:@(mid)];
     }
-    (void)[self encode:[MQTTMessage unsubscribeMessageWithMessageId:mid
-                                                             topics:topics
-                                                      protocolLevel:self.protocolLevel]];
+    dispatch_async(self.msgQueue, ^{
+        (void)[self encode:[MQTTMessage unsubscribeMessageWithMessageId:mid
+                                                                 topics:topics
+                                                          protocolLevel:self.protocolLevel]];
+    });
     return mid;
 }
 
@@ -380,15 +386,17 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
                                                correlationData:nil
                                                   userProperty:nil
                                                    contentType:nil];
-        NSError *error = nil;
-        if (![self encode:msg]) {
-            error = [NSError errorWithDomain:MQTTSessionErrorDomain
-                                        code:MQTTSessionErrorEncoderNotReady
-                                    userInfo:@{NSLocalizedDescriptionKey : @"Encoder not ready"}];
-        }
-        if (publishHandler) {
-            [self onPublish:publishHandler error:error];
-        }
+        dispatch_async(self.msgQueue, ^{
+            NSError *error = nil;
+            if (![self encode:msg]) {
+                error = [NSError errorWithDomain:MQTTSessionErrorDomain
+                                            code:MQTTSessionErrorEncoderNotReady
+                                        userInfo:@{NSLocalizedDescriptionKey : @"Encoder not ready"}];
+            }
+            if (publishHandler) {
+                [self onPublish:publishHandler error:error];
+            }
+        });
     } else {
         msgId = [self nextMsgId];
         MQTTMessage *msg = nil;
@@ -462,13 +470,15 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
             }
 
             if ((flow.commandType).intValue == MQTTPublish) {
-                DDLogVerbose(@"[MQTTSession] PUBLISH %d", msgId);
-                if (![self encode:msg]) {
-                    DDLogInfo(@"[MQTTSession] queueing message %d after unsuccessfull attempt", msgId);
-                    flow.commandType = [NSNumber numberWithUnsignedInt:MQTT_None];
-                    flow.deadline = [NSDate date];
-                    [self.persistence sync];
-                }
+                dispatch_async(self.msgQueue, ^{
+                    DDLogVerbose(@"[MQTTSession] PUBLISH %d", msgId);
+                    if (![self encode:msg]) {
+                        DDLogInfo(@"[MQTTSession] queueing message %d after unsuccessfull attempt", msgId);
+                        flow.commandType = [NSNumber numberWithUnsignedInt:MQTT_None];
+                        flow.deadline = [NSDate date];
+                        [self.persistence sync];
+                    }
+                });
             } else {
                 DDLogInfo(@"[MQTTSession] queueing message %d", msgId);
             }
@@ -517,13 +527,14 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
                     userProperty:(NSDictionary<NSString *,NSString *> *)userProperty {
     DDLogVerbose(@"[MQTTSession] sending DISCONNECT");
     self.status = MQTTSessionStatusDisconnecting;
-
-    [self encode:[MQTTMessage disconnectMessage:self.protocolLevel
-                                     returnCode:returnCode
-                          sessionExpiryInterval:sessionExpiryInterval
-                                   reasonString:reasonString
-                                   userProperty:userProperty]];
-    [self closeInternal];
+    dispatch_async(self.msgQueue, ^{
+        [self encode:[MQTTMessage disconnectMessage:self.protocolLevel
+                                         returnCode:returnCode
+                              sessionExpiryInterval:sessionExpiryInterval
+                                       reasonString:reasonString
+                                       userProperty:userProperty]];
+        [self closeInternal];
+    });
 }
 
 - (void)closeInternal {
@@ -602,13 +613,17 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
 
 
 - (void)keepAlive {
-    DDLogVerbose(@"[MQTTSession] keepAlive %@ @%.0f", self.clientId, [[NSDate date] timeIntervalSince1970]);
-    (void)[self encode:[MQTTMessage pingreqMessage]];
+    dispatch_async(self.msgQueue, ^{
+        DDLogVerbose(@"[MQTTSession] keepAlive %@ @%.0f", self.clientId, [[NSDate date] timeIntervalSince1970]);
+        (void)[self encode:[MQTTMessage pingreqMessage]];
+    });
 }
 
 - (void)checkDup {
-    DDLogVerbose(@"[MQTTSession] checkDup %@ @%.0f", self.clientId, [[NSDate date] timeIntervalSince1970]);
-    [self checkTxFlows];
+    dispatch_async(self.msgQueue, ^{
+        DDLogVerbose(@"[MQTTSession] checkDup %@ @%.0f", self.clientId, [[NSDate date] timeIntervalSince1970]);
+        [self checkTxFlows];
+    });
 }
 
 - (void)checkTxFlows {
@@ -1032,11 +1047,13 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
                     self.messageHandler(data, topic);
                 }
                 if (processed) {
-                    (void)[self encode:[MQTTMessage pubackMessageWithMessageId:msgId
-                                                                 protocolLevel:self.protocolLevel
-                                                                    returnCode:MQTTSuccess
-                                                                  reasonString:nil
-                                                                  userProperty:nil]];
+                    dispatch_async(self.msgQueue, ^{
+                        (void)[self encode:[MQTTMessage pubackMessageWithMessageId:msgId
+                                                                     protocolLevel:self.protocolLevel
+                                                                        returnCode:MQTTSuccess
+                                                                      reasonString:nil
+                                                                      userProperty:nil]];
+                    });
                 }
                 return;
             } else {
@@ -1053,11 +1070,13 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
                 } else {
                     [self.persistence sync];
                     [self tell];
-                    (void)[self encode:[MQTTMessage pubrecMessageWithMessageId:msgId
-                                                                 protocolLevel:self.protocolLevel
-                                                                    returnCode:MQTTSuccess
-                                                                  reasonString:nil
-                                                                  userProperty:nil]];
+                    dispatch_async(self.msgQueue, ^{
+                        (void)[self encode:[MQTTMessage pubrecMessageWithMessageId:msgId
+                                                                     protocolLevel:self.protocolLevel
+                                                                        returnCode:MQTTSuccess
+                                                                      reasonString:nil
+                                                                      userProperty:nil]];
+                    });
                 }
             }
         }
@@ -1150,7 +1169,9 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
             [self.persistence sync];
         }
     }
-    (void)[self encode:pubrelmessage];
+    dispatch_async(self.msgQueue, ^{
+        (void)[self encode:pubrelmessage];
+    });
 }
 
 - (void)handlePubrel:(MQTTMessage *)message {
@@ -1193,11 +1214,13 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
             [self.persistence deleteFlow:flow];
             [self.persistence sync];
             [self tell];
-            (void)[self encode:[MQTTMessage pubcompMessageWithMessageId:message.mid
-                                                          protocolLevel:self.protocolLevel
-                                                             returnCode:MQTTSuccess
-                                                           reasonString:nil
-                                                           userProperty:nil]];
+            dispatch_async(self.msgQueue, ^{
+                (void)[self encode:[MQTTMessage pubcompMessageWithMessageId:message.mid
+                                                              protocolLevel:self.protocolLevel
+                                                                 returnCode:MQTTSuccess
+                                                               reasonString:nil
+                                                               userProperty:nil]];
+            });
         }
     }
 }
@@ -1606,31 +1629,33 @@ NSString * const MQTTSessionErrorDomain = @"MQTT";
 
     DDLogVerbose(@"[MQTTSession] sending CONNECT");
 
-    if (!self.connectMessage) {
-        (void)[self encode:[MQTTMessage connectMessageWithClientId:self.clientId
-                                                          userName:self.userName
-                                                          password:self.password
-                                                         keepAlive:self.keepAliveInterval
-                                                      cleanSession:self.cleanSessionFlag
-                                                              will:self.willFlag
-                                                         willTopic:self.willTopic
-                                                           willMsg:self.willMsg
-                                                           willQoS:self.willQoS
-                                                        willRetain:self.willRetainFlag
-                                                     protocolLevel:self.protocolLevel
-                                             sessionExpiryInterval:self.sessionExpiryInterval
-                                                        authMethod:self.authMethod
-                                                          authData:self.authData
-                                         requestProblemInformation:self.requestProblemInformation
-                                                 willDelayInterval:self.willDelayInterval
-                                        requestResponseInformation:self.requestResponseInformation
-                                                    receiveMaximum:self.receiveMaximum
-                                                 topicAliasMaximum:self.topicAliasMaximum
-                                                      userProperty:self.userProperty
-                                                 maximumPacketSize:self.maximumPacketSize]];
-    } else {
-        (void)[self encode:self.connectMessage];
-    }
+    dispatch_async(self.msgQueue, ^{
+        if (!self.connectMessage) {
+            (void)[self encode:[MQTTMessage connectMessageWithClientId:self.clientId
+                                                              userName:self.userName
+                                                              password:self.password
+                                                             keepAlive:self.keepAliveInterval
+                                                          cleanSession:self.cleanSessionFlag
+                                                                  will:self.willFlag
+                                                             willTopic:self.willTopic
+                                                               willMsg:self.willMsg
+                                                               willQoS:self.willQoS
+                                                            willRetain:self.willRetainFlag
+                                                         protocolLevel:self.protocolLevel
+                                                 sessionExpiryInterval:self.sessionExpiryInterval
+                                                            authMethod:self.authMethod
+                                                              authData:self.authData
+                                             requestProblemInformation:self.requestProblemInformation
+                                                     willDelayInterval:self.willDelayInterval
+                                            requestResponseInformation:self.requestResponseInformation
+                                                        receiveMaximum:self.receiveMaximum
+                                                     topicAliasMaximum:self.topicAliasMaximum
+                                                          userProperty:self.userProperty
+                                                     maximumPacketSize:self.maximumPacketSize]];
+        } else {
+            (void)[self encode:self.connectMessage];
+        }
+    });
 }
 
 - (void)mqttTransport:(id<MQTTTransport>)mqttTransport didFailWithError:(NSError *)error {
